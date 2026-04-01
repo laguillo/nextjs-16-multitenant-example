@@ -1,36 +1,121 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Multi-Tenant App — Next.js 16 Demo
 
-## Getting Started
+Demo de arquitectura multi-tenant con subdominios, autenticación simulada y datos aislados por tenant. Sin base de datos — todo hardcodeado. El objetivo es entender y validar el patrón multi-tenant en Next.js 16.
 
-First, run the development server:
+## Stack
 
-```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+- **Next.js 16.2.2** con App Router y Turbopack
+- **React 19**
+- **TypeScript**
+- **Tailwind CSS v4**
+- Sin base de datos — datos hardcodeados en `src/lib/tenants.ts`
+
+## Estrategia multi-tenant
+
+Cada tenant se identifica por subdominio:
+
+| Subdominio | Tenant | Plan |
+|---|---|---|
+| `tenant1.localhost:3000` | Acme Corp | Pro |
+| `tenant2.localhost:3000` | Globex Inc | Enterprise |
+| `tenant3.localhost:3000` | Initech | Starter |
+
+El archivo `src/proxy.ts` (equivalente al `middleware.ts` de Next.js ≤15, renombrado en v16) intercepta cada request, extrae el subdominio y hace un **rewrite interno transparente** a `/[tenant]/ruta`. El usuario siempre ve `tenant1.localhost:3000/products`, pero Next.js sirve internamente desde `/tenant1/products`.
+
+## Configuración previa
+
+Agregar las siguientes entradas a `/etc/hosts`:
+
+```
+127.0.0.1  tenant1.localhost
+127.0.0.1  tenant2.localhost
+127.0.0.1  tenant3.localhost
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+## Instalación y arranque
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+```bash
+npm install
+npm run dev
+```
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+Abrir `http://localhost:3000` para ver la landing con los 3 tenants y sus credenciales de prueba.
 
-## Learn More
+## Credenciales de prueba
 
-To learn more about Next.js, take a look at the following resources:
+Contraseña para todos los usuarios: `tenant{N}123` (ej. `tenant1123` para tenant1).
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+**Acme Corp** (`tenant1.localhost:3000`)
+- `alice@acme.com` — Admin
+- `bob@acme.com` — Manager
+- `carol@acme.com` — Viewer
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+**Globex Inc** (`tenant2.localhost:3000`)
+- `david@globex.com` — Admin
+- `emma@globex.com` — Manager
+- `frank@globex.com` — Manager
+- `grace@globex.com` — Viewer
 
-## Deploy on Vercel
+**Initech** (`tenant3.localhost:3000`)
+- `peter@initech.com` — Admin
+- `samir@initech.com` — Viewer
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+## Cómo funciona
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+```
+Request: GET tenant1.localhost:3000/products
+         │
+         ▼
+   src/proxy.ts
+   ├── Extrae subdominio "tenant1" desde request.url
+   ├── Verifica cookie "tenant-session"
+   │   ├── Sin sesión → redirect a /login
+   │   └── Con sesión → continúa
+   └── Rewrite interno: /products → /tenant1/products
+         │
+         ▼
+   src/app/[tenant]/products/page.tsx
+   └── Lee params.tenant = "tenant1"
+   └── Filtra datos de tenants.ts para ese tenant
+```
+
+### Auth guard
+
+El proxy verifica la cookie `tenant-session` en cada request. La cookie se setea en `POST /api/auth/login` con los datos del usuario y el tenant. No hay JWT firmado — es una demo.
+
+### Aislamiento de datos
+
+Cada página recibe el tenant desde `params` (inyectado por el rewrite del proxy) y llama a `getTenantBySubdomain()` para obtener únicamente los datos de ese tenant.
+
+## Estructura del proyecto
+
+```
+src/
+├── proxy.ts                        ← Routing multi-tenant + auth guard (Next.js 16)
+├── app/
+│   ├── layout.tsx                  ← Root layout global
+│   ├── page.tsx                    ← Landing page con los 3 tenants
+│   ├── [tenant]/
+│   │   ├── layout.tsx              ← Layout con TenantNavbar (tema dinámico)
+│   │   ├── page.tsx                ← Dashboard del tenant
+│   │   ├── login/
+│   │   │   ├── layout.tsx          ← Override: sin navbar
+│   │   │   └── page.tsx            ← Página de login
+│   │   ├── products/page.tsx       ← Catálogo de productos del tenant
+│   │   └── users/page.tsx          ← Usuarios del tenant
+│   └── api/auth/
+│       ├── login/route.ts          ← POST: valida credenciales, setea cookie
+│       └── logout/route.ts         ← POST: elimina cookie
+├── components/
+│   ├── TenantNavbar.tsx            ← Navbar con tema por tenant
+│   └── LoginForm.tsx               ← Formulario de login (client component)
+└── lib/
+    └── tenants.ts                  ← Datos hardcodeados + helpers
+```
+
+## Breaking changes de Next.js 16 aplicados
+
+- `middleware.ts` → renombrado a `proxy.ts`, función exportada como `proxy`
+- `params` es una **Promise** → siempre `await params`
+- `cookies()` retorna una **Promise** → `await cookies()`
+- `PageProps` y `LayoutProps` son tipos globales — no se importan de ningún módulo
